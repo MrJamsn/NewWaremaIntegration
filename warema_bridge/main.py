@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import signal
+import time
 from typing import Optional
 
 import aiomqtt
@@ -141,6 +142,9 @@ def discovery_payload(snr: int, name: str) -> dict:
 # Bridge
 # ---------------------------------------------------------------------------
 
+_STARTUP_GRACE = 6.0  # seconds after subscribe during which commands are ignored
+
+
 class WaremaBridge:
     def __init__(self):
         self.stick: Optional[WmsStick] = None
@@ -150,6 +154,7 @@ class WaremaBridge:
         self._moving_snrs: set[int] = set()
         self._move_poll_task: Optional[asyncio.Task] = None
         self._moving_event: asyncio.Event = asyncio.Event()
+        self._subscribed_at: float = 0.0  # monotonic timestamp of first subscribe
 
     def _start_tracking(self, snr: int):
         """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
@@ -203,7 +208,9 @@ class WaremaBridge:
             await mqtt.subscribe(f"{STATE_PREFIX}/+/set")
             await mqtt.subscribe(f"{STATE_PREFIX}/+/set_position")
             await mqtt.subscribe(f"{STATE_PREFIX}/+/tilt")
-            log.info("Subscribed to command topics")
+            self._subscribed_at = time.monotonic()
+            log.info("Subscribed to command topics — ignoring commands for %.0fs (startup grace)",
+                     _STARTUP_GRACE)
 
             # Start polling
             self._poll_task = asyncio.create_task(self._poll_loop())
@@ -407,14 +414,23 @@ class WaremaBridge:
     # ------------------------------------------------------------------
 
     async def _handle_mqtt(self, message: aiomqtt.Message):
-        # Retained messages are replayed by the broker on subscription.
-        # Ignore them — acting on stale commands would physically move blinds.
+        # Drop broker-retained messages (replayed on subscription).
         if message.retain:
             log.debug("Ignoring retained command on %s", message.topic)
             return
 
         topic = str(message.topic)
         payload = message.payload.decode().strip()
+
+        # Startup grace period: HA sends a burst of "restore state" commands
+        # immediately after the entity appears via discovery. Ignore all commands
+        # for the first few seconds after subscribing so blinds don't move.
+        elapsed = time.monotonic() - self._subscribed_at
+        if elapsed < _STARTUP_GRACE:
+            log.info("Startup grace (%.1fs / %.0fs): ignoring %s = %s",
+                     elapsed, _STARTUP_GRACE, topic, payload)
+            return
+
         log.debug("MQTT IN: %s = %s", topic, payload)
 
         # Extract SNR from topic: warema/<snr>/set or warema/<snr>/set_position

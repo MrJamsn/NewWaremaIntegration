@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.10] - 2026-04-13
+### Fixed
+- Blinds still moved on restart even after v1.0.9. The commands arriving
+  1–4 seconds after subscribing are *live* commands sent by HA to restore its
+  last known cover state — not broker-retained messages — so `message.retain`
+  was False and the previous check had no effect.
+  Added a 6-second startup grace period: all commands received within 6 seconds
+  of the initial MQTT subscribe are silently dropped and logged at INFO level.
+  The broker-retain check and command-topic clearing (from v1.0.9) are kept as
+  additional layers of protection.
+
 ## [1.0.9] - 2026-04-13
 ### Fixed
 - Blinds still moved on restart after v1.0.8 because old retained messages
