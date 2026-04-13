@@ -121,7 +121,7 @@ def discovery_payload(snr: int, name: str) -> dict:
         "position_open": 100,
         "position_closed": 0,
         "set_position_topic": topic_cmd_position(snr),
-        "set_position_template": "{{ 100 - value | int }}",   # invert for WMS
+        "set_position_template": "{{ 100 - position | int }}",   # invert for WMS
         "command_topic": topic_cmd_set(snr),
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
@@ -370,6 +370,12 @@ class WaremaBridge:
         name = f"Warema {type_str.strip()} {snr}"
         self.stick.add_blind(snr, name=name)
         self._registered_snrs.add(snr)
+
+        # Clear the retained discovery message first so HA fully re-creates
+        # the entity — this picks up any new capabilities (tilt, position
+        # slider) that were added in newer addon versions.
+        await self.mqtt.publish(topic_discovery(snr), b"", retain=True)
+        await asyncio.sleep(0.2)
 
         # HA autodiscovery
         payload = discovery_payload(snr, name)
