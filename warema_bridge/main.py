@@ -214,19 +214,107 @@ class WaremaBridge:
     # ------------------------------------------------------------------
 
     async def _run_discovery_mode(self):
-        log.info("=== DISCOVERY MODE ===")
-        log.info("Waiting for WMS network parameters (timeout: 180s)...")
+        SEP = "=" * 62
+        log.info(SEP)
+        log.info("  WAREMA WMS — NETWORK PARAMETER DISCOVERY MODE")
+        log.info(SEP)
+        log.info("wms_pan_id is FFFF, so the addon is listening for your")
+        log.info("WMS network parameters. Follow these steps on your remote:")
+        log.info("")
+        log.info("  1. Open the battery cover of the WMS handheld remote.")
+        log.info("  2. Press and HOLD the PROG / LEARN button (~5 seconds)")
+        log.info("     until the LED flashes rapidly.")
+        log.info("  3. Use the remote to select the correct channel.")
+        log.info("  4. The remote will scan for the WMS Stick (this addon).")
+        log.info("  5. When 'Stick' appears on the remote display, press STOP")
+        log.info("     to confirm. The stick is now taught in.")
+        log.info("")
+        log.info("Waiting up to 180 seconds ...")
+        log.info(SEP)
+
         try:
             params = await self.stick.discover_network_params(timeout_s=180)
-            log.info("=== NETWORK PARAMETERS FOUND ===")
-            log.info("  WMS_CHANNEL: %d",   params["channel"])
-            log.info("  WMS_PAN_ID:  %s",   params["pan_id"])
-            log.info("  WMS_KEY:     %s",   params["network_key"])
-            log.info("Copy these values into your addon configuration and restart.")
+
+            log.info(SEP)
+            log.info("  PARAMETERS FOUND — copy these into the addon config:")
+            log.info("")
+            log.info("    wms_channel : %d",  params["channel"])
+            log.info("    wms_pan_id  : %s",  params["pan_id"])
+            log.info("    wms_key     : %s",  params["network_key"])
+            log.info("")
+            log.info("  Then RESTART the addon.")
+            log.info(SEP)
+
+            result = {
+                "wms_channel": params["channel"],
+                "wms_pan_id":  params["pan_id"],
+                "wms_key":     params["network_key"],
+            }
+
+            # Write to /share/ so the user can read it from the HA file manager
+            try:
+                with open("/share/warema_params.json", "w") as fh:
+                    json.dump(result, fh, indent=2)
+                log.info("Parameters saved to /share/warema_params.json")
+            except Exception as exc:
+                log.warning("Could not write /share/warema_params.json: %s", exc)
+
+            # Publish to MQTT so it shows up in MQTT Explorer / HA MQTT sensors
+            try:
+                await self.mqtt.publish(
+                    "warema/discovery/params", json.dumps(result), retain=True
+                )
+                log.info("Parameters published to MQTT topic: warema/discovery/params")
+            except Exception as exc:
+                log.warning("Could not publish params to MQTT: %s", exc)
+
+            # Create a visible notification inside Home Assistant
+            await self._notify_ha(
+                title="Warema WMS — Network Parameters Found",
+                message=(
+                    f"**Channel:** {params['channel']}  \n"
+                    f"**PAN ID:** {params['pan_id']}  \n"
+                    f"**Key:** {params['network_key']}  \n\n"
+                    "Copy these into the addon configuration, then restart it."
+                ),
+                notification_id="warema_wms_discovery",
+            )
+
         except asyncio.TimeoutError:
-            log.error("Discovery timed out. Please try again.")
+            log.error("Discovery timed out after 180 s. Please try again.")
+            await self._notify_ha(
+                title="Warema WMS — Discovery Timed Out",
+                message="No network parameters received. Re-run the teach-in steps and restart the addon.",
+                notification_id="warema_wms_discovery",
+            )
         finally:
             await self.stick.disconnect()
+
+    async def _notify_ha(self, title: str, message: str, notification_id: str):
+        """Create a persistent notification in Home Assistant via the Supervisor API."""
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        if not token:
+            log.debug("No SUPERVISOR_TOKEN available, skipping HA notification")
+            return
+        import urllib.request
+        import urllib.error
+        url = "http://supervisor/core/api/services/persistent_notification/create"
+        payload = json.dumps({
+            "title": title,
+            "message": message,
+            "notification_id": notification_id,
+        }).encode()
+        req = urllib.request.Request(url, data=payload, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        })
+        try:
+            await asyncio.to_thread(urllib.request.urlopen, req, timeout=5)
+            log.info("HA notification created: %s", title)
+        except urllib.error.URLError as exc:
+            log.debug("Could not reach HA API for notification: %s", exc)
+        except Exception as exc:
+            log.debug("HA notification error: %s", exc)
 
     # ------------------------------------------------------------------
     # Initial scan and blind registration
