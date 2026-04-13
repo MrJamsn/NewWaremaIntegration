@@ -1,20 +1,21 @@
 #!/usr/bin/with-contenv bashio
 
-# Prefer MQTT credentials from the Supervisor service (Mosquitto broker addon).
-# Fall back to manually configured options when the service is not available.
-if bashio::services.available "mqtt"; then
-    bashio::log.info "MQTT: using credentials from Supervisor service"
-    export MQTT_SERVER=$(bashio::services "mqtt.host")
-    export MQTT_PORT=$(bashio::services "mqtt.port")
-    export MQTT_USER=$(bashio::services "mqtt.username")
-    export MQTT_PASSWORD=$(bashio::services "mqtt.password")
+# Get MQTT broker credentials from the Supervisor service.
+# bashio::services "mqtt"  →  GET /services/mqtt  (returns full JSON object)
+# bashio::services "mqtt.host"  →  wrongly calls GET /services/mqtt.host  (404)
+# So we query the whole object once and extract fields with jq.
+if MQTT_JSON=$(bashio::services "mqtt" 2>/dev/null) && [ -n "${MQTT_JSON}" ]; then
+    bashio::log.info "MQTT: credentials received from Supervisor service"
+    export MQTT_SERVER=$(echo "${MQTT_JSON}" | jq --raw-output '.host  // "core-mosquitto"')
+    export MQTT_PORT=$(echo "${MQTT_JSON}"   | jq --raw-output '.port  // 1883')
+    export MQTT_USER=$(echo "${MQTT_JSON}"   | jq --raw-output '.username // ""')
+    export MQTT_PASSWORD=$(echo "${MQTT_JSON}" | jq --raw-output '.password // ""')
 else
-    bashio::log.warning "MQTT: Supervisor service not available — using manual config"
-    _host=$(bashio::config 'mqtt_server')
-    export MQTT_SERVER="${_host:-core-mosquitto}"
-    export MQTT_PORT=$(bashio::config 'mqtt_port')
-    export MQTT_USER=$(bashio::config 'mqtt_user')
-    export MQTT_PASSWORD=$(bashio::config 'mqtt_password')
+    bashio::log.warning "MQTT: Supervisor service not available — will attempt core-mosquitto"
+    export MQTT_SERVER="core-mosquitto"
+    export MQTT_PORT="1883"
+    export MQTT_USER=""
+    export MQTT_PASSWORD=""
 fi
 
 export WMS_SERIAL_PORT=$(bashio::config 'wms_serial_port')
