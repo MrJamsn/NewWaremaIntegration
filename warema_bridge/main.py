@@ -37,7 +37,7 @@ def get_env_int(key: str, default: int) -> int:
     except ValueError:
         return default
 
-MQTT_SERVER       = get_env("MQTT_SERVER", "mqtt://homeassistant").removeprefix("mqtt://").removeprefix("mqtts://")
+MQTT_SERVER       = (get_env("MQTT_SERVER") or "core-mosquitto").removeprefix("mqtt://").removeprefix("mqtts://")
 MQTT_PORT         = get_env_int("MQTT_PORT", 1883)
 MQTT_USER         = get_env("MQTT_USER") or None
 MQTT_PASSWORD     = get_env("MQTT_PASSWORD") or None
