@@ -134,7 +134,6 @@ def discovery_payload(snr: int, name: str) -> dict:
         "tilt_opened_value": 50,   # horizontal = open for light
         "tilt_closed_value": 0,    # fully tilted = blocking light
         "optimistic": False,
-        "retain": True,
     }
 
 
