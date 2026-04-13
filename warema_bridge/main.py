@@ -94,6 +94,12 @@ def topic_cmd_set(snr: int) -> str:
 def topic_cmd_position(snr: int) -> str:
     return f"{STATE_PREFIX}/{snr}/set_position"
 
+def topic_tilt(snr: int) -> str:
+    return f"{STATE_PREFIX}/{snr}/tilt"
+
+def topic_tilt_state(snr: int) -> str:
+    return f"{STATE_PREFIX}/{snr}/tilt_state"
+
 
 def discovery_payload(snr: int, name: str) -> dict:
     """Build the HA MQTT discovery payload for a cover entity."""
@@ -120,6 +126,13 @@ def discovery_payload(snr: int, name: str) -> dict:
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
         "payload_stop": "STOP",
+        # Tilt / slat angle: HA 0-100, centre (50) = slats horizontal (max light)
+        "tilt_command_topic": topic_tilt(snr),
+        "tilt_status_topic": topic_tilt_state(snr),
+        "tilt_min": 0,
+        "tilt_max": 100,
+        "tilt_opened_value": 50,   # horizontal = open for light
+        "tilt_closed_value": 0,    # fully tilted = blocking light
         "optimistic": False,
         "retain": True,
     }
@@ -184,6 +197,7 @@ class WaremaBridge:
             # Subscribe to command topics
             await mqtt.subscribe(f"{STATE_PREFIX}/+/set")
             await mqtt.subscribe(f"{STATE_PREFIX}/+/set_position")
+            await mqtt.subscribe(f"{STATE_PREFIX}/+/tilt")
             log.info("Subscribed to command topics")
 
             # Start polling
@@ -273,11 +287,13 @@ class WaremaBridge:
         await self.mqtt.publish(topic_availability(snr), "online", retain=True)
         log.info("Registered blind: %s (SNR %d)", name, snr)
 
-        # Get initial position
+        # Get initial position and tilt
         try:
             pos = await self.stick.get_position(snr)
-            ha_pos = 100 - pos["position"]  # invert: WMS 0=open, HA 100=open
+            ha_pos = max(0, min(100, 100 - pos["position"]))
+            ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
+            await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
         except asyncio.TimeoutError:
             log.warning("Could not get initial position for SNR %d", snr)
 
@@ -341,22 +357,43 @@ class WaremaBridge:
             except asyncio.TimeoutError:
                 log.warning("Timeout sending position %s to SNR %d", payload, snr)
 
+        elif cmd == "tilt":
+            try:
+                # HA tilt 0-100 → WMS angle pct: 0→-100, 50→0 (horizontal), 100→+100
+                ha_tilt = max(0, min(100, int(payload)))
+                wms_angle = ha_tilt * 2 - 100
+                blind = self.stick.get_blind_state(snr)
+                wms_pos = blind.position if (blind and blind.position >= 0) else 0
+                log.info("TILT SNR %d -> angle %d (HA tilt %d)", snr, wms_angle, ha_tilt)
+                await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
+            except ValueError:
+                log.warning("Invalid tilt payload: %s", payload)
+            except asyncio.TimeoutError:
+                log.warning("Timeout sending tilt to SNR %d", snr)
+
     # ------------------------------------------------------------------
     # Position + weather callbacks from WmsStick
     # ------------------------------------------------------------------
 
     def _on_position(self, blind):
-        """Called by WmsStick when a position update arrives."""
+        """Called by WmsStick when a position update arrives (including from remote)."""
         snr = blind.snr
         if snr not in self._registered_snrs:
             return
-        ha_pos = 100 - blind.position   # invert for HA
-        log.debug("Position update SNR %d: WMS=%d HA=%d moving=%s",
-                  snr, blind.position, ha_pos, blind.moving)
+        ha_pos = max(0, min(100, 100 - blind.position))
+        ha_tilt = max(0, min(100, round((blind.angle + 100) / 2)))
+        log.debug("Position update SNR %d: WMS=%d HA=%d tilt=%d moving=%s",
+                  snr, blind.position, ha_pos, ha_tilt, blind.moving)
         asyncio.create_task(
             self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
         )
-        if not blind.moving:
+        asyncio.create_task(
+            self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
+        )
+        if blind.moving:
+            # Could be remote-controlled — track it for fast polling
+            self._moving_snrs.add(snr)
+        else:
             self._moving_snrs.discard(snr)
 
     def _on_weather(self, weather: dict):
@@ -386,8 +423,10 @@ class WaremaBridge:
             for snr in list(self._registered_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = 100 - pos["position"]
+                    ha_pos = max(0, min(100, 100 - pos["position"]))
+                    ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
+                    await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if pos["moving"]:
                         self._moving_snrs.add(snr)
                 except asyncio.TimeoutError:
@@ -402,8 +441,10 @@ class WaremaBridge:
             for snr in list(self._moving_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = 100 - pos["position"]
+                    ha_pos = max(0, min(100, 100 - pos["position"]))
+                    ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
+                    await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if not pos["moving"]:
                         log.debug("SNR %d finished moving at position %d", snr, pos["position"])
                         self._moving_snrs.discard(snr)

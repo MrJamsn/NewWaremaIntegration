@@ -83,7 +83,7 @@ def snr_hex_to_int(hex_str: str) -> int:
 
 def pos_hex_to_pct(hex2: str) -> int:
     """Convert 2-char hex position byte to 0-100 percent."""
-    return round(int(hex2, 16) / 2)
+    return min(100, max(0, round(int(hex2, 16) / 2)))
 
 
 def pos_pct_to_hex(pct: int) -> str:
