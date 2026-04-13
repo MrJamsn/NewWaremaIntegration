@@ -1,10 +1,21 @@
 #!/usr/bin/with-contenv bashio
 
-# Read MQTT credentials from the HA MQTT service (configured via Mosquitto broker addon)
-export MQTT_SERVER=$(bashio::services "mqtt.host")
-export MQTT_PORT=$(bashio::services "mqtt.port")
-export MQTT_USER=$(bashio::services "mqtt.username")
-export MQTT_PASSWORD=$(bashio::services "mqtt.password")
+# Prefer MQTT credentials from the Supervisor service (Mosquitto broker addon).
+# Fall back to manually configured options when the service is not available.
+if bashio::services.available "mqtt"; then
+    bashio::log.info "MQTT: using credentials from Supervisor service"
+    export MQTT_SERVER=$(bashio::services "mqtt.host")
+    export MQTT_PORT=$(bashio::services "mqtt.port")
+    export MQTT_USER=$(bashio::services "mqtt.username")
+    export MQTT_PASSWORD=$(bashio::services "mqtt.password")
+else
+    bashio::log.warning "MQTT: Supervisor service not available — using manual config"
+    _host=$(bashio::config 'mqtt_server')
+    export MQTT_SERVER="${_host:-core-mosquitto}"
+    export MQTT_PORT=$(bashio::config 'mqtt_port')
+    export MQTT_USER=$(bashio::config 'mqtt_user')
+    export MQTT_PASSWORD=$(bashio::config 'mqtt_password')
+fi
 
 export WMS_SERIAL_PORT=$(bashio::config 'wms_serial_port')
 export WMS_CHANNEL=$(bashio::config 'wms_channel')
