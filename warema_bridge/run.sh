@@ -1,17 +1,31 @@
 #!/usr/bin/with-contenv bashio
 
 # Get MQTT broker credentials from the Supervisor service.
-# bashio::services "mqtt"  →  GET /services/mqtt  (returns full JSON object)
-# bashio::services "mqtt.host"  →  wrongly calls GET /services/mqtt.host  (404)
-# So we query the whole object once and extract fields with jq.
-if MQTT_JSON=$(bashio::services "mqtt" 2>/dev/null) && [ -n "${MQTT_JSON}" ]; then
-    bashio::log.info "MQTT: credentials received from Supervisor service"
+# Retries 3 times (5 s apart) in case the Mosquitto addon is still starting.
+# Requires the HA MQTT integration to be configured once:
+#   Settings → Devices & Services → Add Integration → MQTT
+MQTT_JSON=""
+for attempt in 1 2 3; do
+    if MQTT_JSON=$(bashio::services "mqtt" 2>/dev/null) && [ -n "${MQTT_JSON}" ]; then
+        bashio::log.info "MQTT: credentials received from Supervisor (attempt ${attempt})"
+        break
+    fi
+    if [ "${attempt}" -lt 3 ]; then
+        bashio::log.warning "MQTT: service not ready yet, retrying in 5 s (${attempt}/3)..."
+        sleep 5
+    fi
+done
+
+if [ -n "${MQTT_JSON}" ]; then
     export MQTT_SERVER=$(echo "${MQTT_JSON}" | jq --raw-output '.host  // "core-mosquitto"')
     export MQTT_PORT=$(echo "${MQTT_JSON}"   | jq --raw-output '.port  // 1883')
     export MQTT_USER=$(echo "${MQTT_JSON}"   | jq --raw-output '.username // ""')
     export MQTT_PASSWORD=$(echo "${MQTT_JSON}" | jq --raw-output '.password // ""')
 else
-    bashio::log.warning "MQTT: Supervisor service not available — will attempt core-mosquitto"
+    bashio::log.warning "MQTT: Supervisor service unavailable after 3 attempts."
+    bashio::log.warning "MQTT: To fix, configure the MQTT integration once in HA:"
+    bashio::log.warning "MQTT:   Settings → Devices & Services → Add Integration → MQTT"
+    bashio::log.warning "MQTT: Falling back to core-mosquitto without credentials."
     export MQTT_SERVER="core-mosquitto"
     export MQTT_PORT="1883"
     export MQTT_USER=""
