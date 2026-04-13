@@ -1,6 +1,6 @@
 name: "Warema WMS Bridge (Python)"
 description: "Controls Warema WMS blinds via USB Stick - MQTT bridge"
-version: "1.0.3"
+version: "1.0.4"
 slug: "warema_wms_py"
 init: false
 arch:
@@ -19,10 +19,6 @@ map:
   - share:rw
 
 options:
-  mqtt_server: ""
-  mqtt_port: 1883
-  mqtt_user: ""
-  mqtt_password: ""
   wms_serial_port: "/dev/ttyUSB0"
   wms_channel: 17
   wms_pan_id: "FFFF"
@@ -32,10 +28,6 @@ options:
   log_level: "info"
 
 schema:
-  mqtt_server: str
-  mqtt_port: int
-  mqtt_user: str
-  mqtt_password: password
   wms_serial_port: str
   wms_channel: int
   wms_pan_id: str
