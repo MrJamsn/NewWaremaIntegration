@@ -150,6 +150,12 @@ class WaremaBridge:
         self._poll_task: Optional[asyncio.Task] = None
         self._moving_snrs: set[int] = set()
         self._move_poll_task: Optional[asyncio.Task] = None
+        self._moving_event: asyncio.Event = asyncio.Event()
+
+    def _start_tracking(self, snr: int):
+        """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
+        self._moving_snrs.add(snr)
+        self._moving_event.set()
 
     # ------------------------------------------------------------------
     # Startup
@@ -414,14 +420,14 @@ class WaremaBridge:
                 log.info("OPEN SNR %d", snr)
                 try:
                     await self.stick.set_position(snr, position=0)
-                    self._moving_snrs.add(snr)
+                    self._start_tracking(snr)
                 except asyncio.TimeoutError:
                     log.warning("Timeout sending OPEN to SNR %d", snr)
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
                 try:
                     await self.stick.set_position(snr, position=100)
-                    self._moving_snrs.add(snr)
+                    self._start_tracking(snr)
                 except asyncio.TimeoutError:
                     log.warning("Timeout sending CLOSE to SNR %d", snr)
             elif payload == "STOP":
@@ -439,7 +445,7 @@ class WaremaBridge:
                 wms_pos = max(0, min(100, wms_pos))
                 log.info("SET_POSITION SNR %d -> %d%%", snr, wms_pos)
                 await self.stick.set_position(snr, position=wms_pos)
-                self._moving_snrs.add(snr)
+                self._start_tracking(snr)
             except ValueError:
                 log.warning("Invalid position payload: %s", payload)
             except asyncio.TimeoutError:
@@ -480,7 +486,7 @@ class WaremaBridge:
         )
         if blind.moving:
             # Could be remote-controlled — track it for fast polling
-            self._moving_snrs.add(snr)
+            self._start_tracking(snr)
         else:
             self._moving_snrs.discard(snr)
 
@@ -516,25 +522,41 @@ class WaremaBridge:
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if pos["moving"]:
-                        self._moving_snrs.add(snr)
+                        self._start_tracking(snr)
                 except asyncio.TimeoutError:
                     log.warning("Polling timeout for SNR %d", snr)
                 except Exception as e:
                     log.error("Polling error for SNR %d: %s", snr, e)
 
     async def _moving_poll_loop(self):
-        """Poll moving blinds more frequently to track live position."""
+        """Poll moving blinds frequently.
+
+        Wakes immediately when _start_tracking() sets _moving_event, so the
+        first position update is published without waiting a full MOVING_INTERVAL.
+        Falls back to polling at MOVING_INTERVAL to catch remote-triggered moves.
+        """
         while True:
-            await asyncio.sleep(MOVING_INTERVAL)
+            # Wait up to MOVING_INTERVAL, but wake instantly when a command fires
+            try:
+                await asyncio.wait_for(
+                    self._moving_event.wait(), timeout=MOVING_INTERVAL
+                )
+            except asyncio.TimeoutError:
+                pass
+            self._moving_event.clear()
+
             for snr in list(self._moving_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
                     ha_pos = max(0, min(100, 100 - pos["position"]))
                     ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
+                    log.debug("Moving SNR %d: WMS=%d HA=%d%% moving=%s",
+                              snr, pos["position"], ha_pos, pos["moving"])
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if not pos["moving"]:
-                        log.debug("SNR %d finished moving at position %d", snr, pos["position"])
+                        log.info("SNR %d stopped at WMS pos %d (HA %d%%)",
+                                 snr, pos["position"], ha_pos)
                         self._moving_snrs.discard(snr)
                 except Exception as e:
                     log.debug("Moving poll error SNR %d: %s", snr, e)
