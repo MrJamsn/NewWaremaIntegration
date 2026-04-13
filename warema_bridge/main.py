@@ -308,15 +308,24 @@ class WaremaBridge:
         if cmd == "set":
             if payload == "OPEN":
                 log.info("OPEN SNR %d", snr)
-                await self.stick.set_position(snr, position=0)
-                self._moving_snrs.add(snr)
+                try:
+                    await self.stick.set_position(snr, position=0)
+                    self._moving_snrs.add(snr)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout sending OPEN to SNR %d", snr)
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
-                await self.stick.set_position(snr, position=100)
-                self._moving_snrs.add(snr)
+                try:
+                    await self.stick.set_position(snr, position=100)
+                    self._moving_snrs.add(snr)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout sending CLOSE to SNR %d", snr)
             elif payload == "STOP":
                 log.info("STOP SNR %d", snr)
-                await self.stick.stop(snr)
+                try:
+                    await self.stick.stop(snr)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout sending STOP to SNR %d — blind may still be moving", snr)
                 self._moving_snrs.discard(snr)
 
         elif cmd == "set_position":
@@ -329,6 +338,8 @@ class WaremaBridge:
                 self._moving_snrs.add(snr)
             except ValueError:
                 log.warning("Invalid position payload: %s", payload)
+            except asyncio.TimeoutError:
+                log.warning("Timeout sending position %s to SNR %d", payload, snr)
 
     # ------------------------------------------------------------------
     # Position + weather callbacks from WmsStick
