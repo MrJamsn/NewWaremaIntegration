@@ -386,6 +386,12 @@ class WaremaBridge:
         await self.mqtt.publish(topic_availability(snr), "online", retain=True)
         log.info("Registered blind: %s (SNR %d)", name, snr)
 
+        # Clear any retained messages on command topics left over from previous
+        # sessions — empty retained payload removes them from the broker so
+        # they are not replayed on the next startup.
+        for cmd_topic in (topic_cmd_set(snr), topic_cmd_position(snr), topic_tilt(snr)):
+            await self.mqtt.publish(cmd_topic, b"", retain=True)
+
         # Get initial position and tilt
         try:
             pos = await self.stick.get_position(snr)
@@ -401,6 +407,12 @@ class WaremaBridge:
     # ------------------------------------------------------------------
 
     async def _handle_mqtt(self, message: aiomqtt.Message):
+        # Retained messages are replayed by the broker on subscription.
+        # Ignore them — acting on stale commands would physically move blinds.
+        if message.retain:
+            log.debug("Ignoring retained command on %s", message.topic)
+            return
+
         topic = str(message.topic)
         payload = message.payload.decode().strip()
         log.debug("MQTT IN: %s = %s", topic, payload)

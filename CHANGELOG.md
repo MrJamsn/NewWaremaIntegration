@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.9] - 2026-04-13
+### Fixed
+- Blinds still moved on restart after v1.0.8 because old retained messages
+  were already stored on the MQTT broker before the `retain` flag was removed
+  from the discovery payload. Two-pronged fix:
+  1. On startup, the addon now publishes empty retained messages to each blind's
+     command topics (`set`, `set_position`, `tilt`) to remove any stored messages
+     from the broker before subscribing.
+  2. `_handle_mqtt` now checks `message.retain` and drops any retained message
+     delivered on subscription — MQTT sets this flag when replaying stored
+     messages to a new subscriber, so commands cannot physically move blinds
+     on restart regardless of broker state.
+
 ## [1.0.8] - 2026-04-13
 ### Fixed
 - Blinds no longer move on addon restart. The discovery payload had `retain: true`
