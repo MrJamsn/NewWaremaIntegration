@@ -18,6 +18,16 @@ else
     export MQTT_PASSWORD=""
 fi
 
+# Allow manual credential override: if mqtt_user is set in the addon config,
+# use it (and its password) regardless of what the Supervisor service returned.
+_CONF_USER=$(bashio::config 'mqtt_user' '' 2>/dev/null || true)
+_CONF_PASS=$(bashio::config 'mqtt_password' '' 2>/dev/null || true)
+if [ -n "${_CONF_USER}" ] && [ "${_CONF_USER}" != "null" ]; then
+    bashio::log.info "MQTT: using credentials from addon config (manual override)"
+    export MQTT_USER="${_CONF_USER}"
+    export MQTT_PASSWORD="${_CONF_PASS}"
+fi
+
 export WMS_SERIAL_PORT=$(bashio::config 'wms_serial_port')
 export WMS_CHANNEL=$(bashio::config 'wms_channel')
 export WMS_PAN_ID=$(bashio::config 'wms_pan_id')
