@@ -1,6 +1,6 @@
 name: "Warema WMS Bridge (Python)"
 description: "Controls Warema WMS blinds via USB Stick - MQTT bridge"
-version: "1.0.11"
+version: "1.0.12"
 slug: "warema_wms_py"
 init: false
 arch:
@@ -25,6 +25,7 @@ options:
   wms_key: "00112233445566778899AABBCCDDEEFF"
   polling_interval: 30
   moving_interval: 1
+  wms_position_max: 100
   mqtt_user: ""
   mqtt_password: ""
   log_level: "info"
@@ -36,6 +37,7 @@ schema:
   wms_key: str
   polling_interval: int
   moving_interval: int
+  wms_position_max: int
   ignored_devices: str?
   force_devices: str?
   mqtt_user: str?

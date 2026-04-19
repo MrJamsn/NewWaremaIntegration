@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.12] - 2026-04-19
+### Added
+- `wms_position_max` config option (default `100`). Some Warema motors physically
+  close at WMS position 50 instead of 100. Setting this to `50` scales all
+  intermediate position commands and state reports so that the HA slider matches
+  the physical blind travel (e.g. HA 50% → WMS 25 instead of WMS 50).
+  OPEN (WMS 0) and CLOSE (WMS position_max) are always correct regardless of
+  this setting.
+
 ## [1.0.11] - 2026-04-19
 ### Fixed
 - `STOP` sent to the tilt command topic (HA sends it when the stop button is

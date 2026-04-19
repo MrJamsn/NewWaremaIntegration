@@ -49,6 +49,9 @@ WMS_PAN_ID        = get_env("WMS_PAN_ID", "FFFF")
 WMS_KEY           = get_env("WMS_KEY", "00112233445566778899AABBCCDDEEFF")
 POLLING_INTERVAL  = get_env_int("POLLING_INTERVAL", 30)    # seconds
 MOVING_INTERVAL   = get_env_int("MOVING_INTERVAL", 2)      # seconds
+# Maximum WMS position value the motor physically responds to.
+# Most motors use 0-100; some models close fully at WMS 50 — set to 50 in that case.
+WMS_POSITION_MAX  = get_env_int("WMS_POSITION_MAX", 100)
 
 IGNORED_DEVICES   = {s.strip() for s in get_env("IGNORED_DEVICES").split(",") if s.strip()}
 FORCE_DEVICES     = {}  # snr_hex -> device_type (parsed below)
@@ -64,6 +67,15 @@ for entry in get_env("FORCE_DEVICES").split(","):
         FORCE_DEVICES[entry] = "25"  # default: radio motor
 
 LOG_LEVEL = get_env("LOG_LEVEL", "info").upper()
+
+
+def wms_to_ha_pos(wms: int) -> int:
+    """Convert WMS position (0=open … WMS_POSITION_MAX=closed) to HA position (0=closed … 100=open)."""
+    return max(0, min(100, round(100 - wms * 100 / WMS_POSITION_MAX)))
+
+def ha_to_wms_pos(ha: int) -> int:
+    """Convert HA position (0=closed … 100=open) to WMS position (0=open … WMS_POSITION_MAX=closed)."""
+    return max(0, min(WMS_POSITION_MAX, round((100 - ha) * WMS_POSITION_MAX / 100)))
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -122,7 +134,8 @@ def discovery_payload(snr: int, name: str) -> dict:
         "position_open": 100,
         "position_closed": 0,
         "set_position_topic": topic_cmd_position(snr),
-        "set_position_template": "{{ 100 - position | int }}",   # invert for WMS
+        # Invert HA position (100=open) to WMS (0=open) and scale to motor range
+        "set_position_template": f"{{{{ ((100 - position | int) * {WMS_POSITION_MAX} / 100) | int }}}}",
         "command_topic": topic_cmd_set(snr),
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
@@ -402,7 +415,7 @@ class WaremaBridge:
         # Get initial position and tilt
         try:
             pos = await self.stick.get_position(snr)
-            ha_pos = max(0, min(100, 100 - pos["position"]))
+            ha_pos = wms_to_ha_pos(pos["position"])
             ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
             await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
@@ -459,7 +472,7 @@ class WaremaBridge:
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
                 try:
-                    await self.stick.set_position(snr, position=100)
+                    await self.stick.set_position(snr, position=WMS_POSITION_MAX)
                     self._start_tracking(snr)
                 except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending CLOSE to SNR %d", snr)
@@ -501,11 +514,11 @@ class WaremaBridge:
                 # Fetch actual current position to avoid inadvertently driving the blind
                 try:
                     pos = await self.stick.get_position(snr)
-                    wms_pos = max(0, min(100, pos["position"]))
+                    wms_pos = max(0, min(WMS_POSITION_MAX, pos["position"]))
                 except (asyncio.TimeoutError, TimeoutError):
                     blind = self.stick.get_blind_state(snr)
                     if blind and blind.position >= 0:
-                        wms_pos = blind.position
+                        wms_pos = max(0, min(WMS_POSITION_MAX, blind.position))
                     else:
                         log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
                         return
@@ -525,7 +538,7 @@ class WaremaBridge:
         snr = blind.snr
         if snr not in self._registered_snrs:
             return
-        ha_pos = max(0, min(100, 100 - blind.position))
+        ha_pos = wms_to_ha_pos(blind.position)
         ha_tilt = max(0, min(100, round((blind.angle + 100) / 2)))
         log.debug("Position update SNR %d: WMS=%d HA=%d tilt=%d moving=%s",
                   snr, blind.position, ha_pos, ha_tilt, blind.moving)
@@ -568,7 +581,7 @@ class WaremaBridge:
             for snr in list(self._registered_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = max(0, min(100, 100 - pos["position"]))
+                    ha_pos = wms_to_ha_pos(pos["position"])
                     ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
@@ -599,7 +612,7 @@ class WaremaBridge:
             for snr in list(self._moving_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = max(0, min(100, 100 - pos["position"]))
+                    ha_pos = wms_to_ha_pos(pos["position"])
                     ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
                     log.debug("Moving SNR %d: WMS=%d HA=%d%% moving=%s",
                               snr, pos["position"], ha_pos, pos["moving"])
