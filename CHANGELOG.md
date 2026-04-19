@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.13] - 2026-04-19
+### Fixed
+- Position percentage kept counting down in HA for up to a minute after the
+  blind physically stopped. Cause: the Warema motor continues reporting
+  `moving=True` while performing final slat micro-adjustments. Added a
+  stable-position guard: if the WMS position is unchanged across 3 consecutive
+  fast-poll cycles (~3 s), fast-polling stops regardless of the motor's moving
+  flag.
+- Note: the automatic tilt change that occurs when the blind reaches 100%
+  (fully closed) is correct Warema motor behavior — the slats auto-tilt to the
+  closed position.
+
 ## [1.0.12] - 2026-04-19
 ### Added
 - `wms_position_max` config option (default `100`). Some Warema motors physically

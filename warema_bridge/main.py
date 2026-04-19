@@ -167,11 +167,16 @@ class WaremaBridge:
         self._moving_snrs: set[int] = set()
         self._move_poll_task: Optional[asyncio.Task] = None
         self._moving_event: asyncio.Event = asyncio.Event()
-        self._subscribed_at: float = 0.0  # monotonic timestamp of first subscribe
+        self._subscribed_at: float = 0.0
+        # Stable-position detection: stop fast-polling when position unchanged
+        self._stable_pos: dict[int, int] = {}    # snr -> last WMS position
+        self._stable_count: dict[int, int] = {}  # snr -> consecutive unchanged polls
 
     def _start_tracking(self, snr: int):
         """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
         self._moving_snrs.add(snr)
+        self._stable_pos.pop(snr, None)
+        self._stable_count.pop(snr, None)
         self._moving_event.set()
 
     # ------------------------------------------------------------------
@@ -612,16 +617,33 @@ class WaremaBridge:
             for snr in list(self._moving_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = wms_to_ha_pos(pos["position"])
+                    wms_pos = pos["position"]
+                    ha_pos = wms_to_ha_pos(wms_pos)
                     ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
                     log.debug("Moving SNR %d: WMS=%d HA=%d%% moving=%s",
-                              snr, pos["position"], ha_pos, pos["moving"])
+                              snr, wms_pos, ha_pos, pos["moving"])
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
-                    if not pos["moving"]:
-                        log.info("SNR %d stopped at WMS pos %d (HA %d%%)",
-                                 snr, pos["position"], ha_pos)
+
+                    stopped = not pos["moving"]
+                    if not stopped:
+                        # Also stop tracking if position has been stable for 3 polls
+                        # (motor can report moving=True while making micro-adjustments)
+                        if self._stable_pos.get(snr) == wms_pos:
+                            self._stable_count[snr] = self._stable_count.get(snr, 0) + 1
+                            if self._stable_count[snr] >= 3:
+                                log.info("SNR %d position stable at WMS %d (HA %d%%) — stopping",
+                                         snr, wms_pos, ha_pos)
+                                stopped = True
+                        else:
+                            self._stable_count[snr] = 0
+                        self._stable_pos[snr] = wms_pos
+
+                    if stopped:
+                        log.info("SNR %d stopped at WMS pos %d (HA %d%%)", snr, wms_pos, ha_pos)
                         self._moving_snrs.discard(snr)
+                        self._stable_pos.pop(snr, None)
+                        self._stable_count.pop(snr, None)
                 except Exception as e:
                     log.debug("Moving poll error SNR %d: %s", snr, e)
 

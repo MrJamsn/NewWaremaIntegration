@@ -1,6 +1,6 @@
 name: "Warema WMS Bridge (Python)"
 description: "Controls Warema WMS blinds via USB Stick - MQTT bridge"
-version: "1.0.12"
+version: "1.0.13"
 slug: "warema_wms_py"
 init: false
 arch:
