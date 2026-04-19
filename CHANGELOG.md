@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.11] - 2026-04-19
+### Fixed
+- `STOP` sent to the tilt command topic (HA sends it when the stop button is
+  pressed) no longer logs a warning — it now correctly calls `stop()` on the
+  blind.
+- Tilt command no longer drives the blind to position 0 when the cached state
+  is stale or unavailable. The handler now calls `get_position()` to fetch the
+  actual current position first; falls back to the cached state if that times
+  out; skips the command entirely if the position is still unknown.
+- Bare `TimeoutError` (raised by `warema_wms` on some Python versions instead
+  of `asyncio.TimeoutError`) is now caught in all command handlers and polling
+  loops, preventing a fatal bridge crash.
+
 ## [1.0.10] - 2026-04-13
 ### Fixed
 - Blinds still moved on restart even after v1.0.9. The commands arriving

@@ -406,7 +406,7 @@ class WaremaBridge:
             ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
             await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             log.warning("Could not get initial position for SNR %d", snr)
 
     # ------------------------------------------------------------------
@@ -454,20 +454,20 @@ class WaremaBridge:
                 try:
                     await self.stick.set_position(snr, position=0)
                     self._start_tracking(snr)
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending OPEN to SNR %d", snr)
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
                 try:
                     await self.stick.set_position(snr, position=100)
                     self._start_tracking(snr)
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending CLOSE to SNR %d", snr)
             elif payload == "STOP":
                 log.info("STOP SNR %d", snr)
                 try:
                     await self.stick.stop(snr)
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending STOP to SNR %d — blind may still be moving", snr)
                 self._moving_snrs.discard(snr)
 
@@ -481,21 +481,39 @@ class WaremaBridge:
                 self._start_tracking(snr)
             except ValueError:
                 log.warning("Invalid position payload: %s", payload)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 log.warning("Timeout sending position %s to SNR %d", payload, snr)
 
         elif cmd == "tilt":
+            # HA sends "STOP" to tilt topic too when the stop button is pressed
+            if payload.upper() == "STOP":
+                log.info("STOP (tilt topic) SNR %d", snr)
+                try:
+                    await self.stick.stop(snr)
+                except (asyncio.TimeoutError, TimeoutError):
+                    log.warning("Timeout sending STOP to SNR %d", snr)
+                self._moving_snrs.discard(snr)
+                return
             try:
                 # HA tilt 0-100 → WMS angle pct: 0→-100, 50→0 (horizontal), 100→+100
                 ha_tilt = max(0, min(100, int(payload)))
                 wms_angle = ha_tilt * 2 - 100
-                blind = self.stick.get_blind_state(snr)
-                wms_pos = blind.position if (blind and blind.position >= 0) else 0
-                log.info("TILT SNR %d -> angle %d (HA tilt %d)", snr, wms_angle, ha_tilt)
+                # Fetch actual current position to avoid inadvertently driving the blind
+                try:
+                    pos = await self.stick.get_position(snr)
+                    wms_pos = max(0, min(100, pos["position"]))
+                except (asyncio.TimeoutError, TimeoutError):
+                    blind = self.stick.get_blind_state(snr)
+                    if blind and blind.position >= 0:
+                        wms_pos = blind.position
+                    else:
+                        log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
+                        return
+                log.info("TILT SNR %d -> angle %d (HA tilt %d, pos %d)", snr, wms_angle, ha_tilt, wms_pos)
                 await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
             except ValueError:
                 log.warning("Invalid tilt payload: %s", payload)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 log.warning("Timeout sending tilt to SNR %d", snr)
 
     # ------------------------------------------------------------------
@@ -556,7 +574,7 @@ class WaremaBridge:
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if pos["moving"]:
                         self._start_tracking(snr)
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Polling timeout for SNR %d", snr)
                 except Exception as e:
                     log.error("Polling error for SNR %d: %s", snr, e)
