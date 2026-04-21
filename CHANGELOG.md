@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.14] - 2026-04-21
+### Fixed
+- Tilt slider in HA was permanently stuck at 100% for Warema "Actuator UP"
+  motors (type 0x20). These motors always return `0xFF` for the angle byte in
+  position reports, which decoded to 171% and clamped to HA 100%.
+  The tilt commands themselves *were* executing correctly (confirmed from
+  `blind_move_to_pos_response` frames echoing the previous angle).
+  Fix: added a per-blind tilt cache. When the angle byte is out of the valid
+  WMS range (−100…+100), the last *commanded* HA tilt is used instead. The
+  tilt topic is also published immediately after each tilt command so the HA
+  slider updates without waiting for the next poll cycle.
+
 ## [1.0.13] - 2026-04-19
 ### Fixed
 - Position percentage kept counting down in HA for up to a minute after the

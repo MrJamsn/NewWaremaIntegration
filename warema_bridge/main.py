@@ -171,6 +171,17 @@ class WaremaBridge:
         # Stable-position detection: stop fast-polling when position unchanged
         self._stable_pos: dict[int, int] = {}    # snr -> last WMS position
         self._stable_count: dict[int, int] = {}  # snr -> consecutive unchanged polls
+        # Tilt cache: Actuator UP motors always report 0xFF for angle byte,
+        # so we track the last commanded HA tilt (0-100) and report that back.
+        self._tilt_state: dict[int, int] = {}    # snr -> last HA tilt (0-100)
+
+    def _ha_tilt(self, angle_pct: int, snr: int) -> int:
+        """Convert WMS angle to HA tilt, using cache when motor reports invalid angle."""
+        if -100 <= angle_pct <= 100:
+            ha = max(0, min(100, round((angle_pct + 100) / 2)))
+            self._tilt_state[snr] = ha
+            return ha
+        return self._tilt_state.get(snr, 50)  # default: horizontal
 
     def _start_tracking(self, snr: int):
         """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
@@ -421,7 +432,7 @@ class WaremaBridge:
         try:
             pos = await self.stick.get_position(snr)
             ha_pos = wms_to_ha_pos(pos["position"])
-            ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
+            ha_tilt = self._ha_tilt(pos["angle"], snr)
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
             await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
         except (asyncio.TimeoutError, TimeoutError):
@@ -528,7 +539,9 @@ class WaremaBridge:
                         log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
                         return
                 log.info("TILT SNR %d -> angle %d (HA tilt %d, pos %d)", snr, wms_angle, ha_tilt, wms_pos)
+                self._tilt_state[snr] = ha_tilt  # cache immediately for motors that don't report angle
                 await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
+                await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
             except ValueError:
                 log.warning("Invalid tilt payload: %s", payload)
             except (asyncio.TimeoutError, TimeoutError):
@@ -544,7 +557,7 @@ class WaremaBridge:
         if snr not in self._registered_snrs:
             return
         ha_pos = wms_to_ha_pos(blind.position)
-        ha_tilt = max(0, min(100, round((blind.angle + 100) / 2)))
+        ha_tilt = self._ha_tilt(blind.angle, snr)
         log.debug("Position update SNR %d: WMS=%d HA=%d tilt=%d moving=%s",
                   snr, blind.position, ha_pos, ha_tilt, blind.moving)
         asyncio.create_task(
@@ -587,7 +600,7 @@ class WaremaBridge:
                 try:
                     pos = await self.stick.get_position(snr)
                     ha_pos = wms_to_ha_pos(pos["position"])
-                    ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
+                    ha_tilt = self._ha_tilt(pos["angle"], snr)
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                     if pos["moving"]:
@@ -619,7 +632,7 @@ class WaremaBridge:
                     pos = await self.stick.get_position(snr)
                     wms_pos = pos["position"]
                     ha_pos = wms_to_ha_pos(wms_pos)
-                    ha_tilt = max(0, min(100, round((pos["angle"] + 100) / 2)))
+                    ha_tilt = self._ha_tilt(pos["angle"], snr)
                     log.debug("Moving SNR %d: WMS=%d HA=%d%% moving=%s",
                               snr, wms_pos, ha_pos, pos["moving"])
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
