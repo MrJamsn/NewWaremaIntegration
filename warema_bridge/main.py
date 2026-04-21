@@ -140,14 +140,16 @@ def discovery_payload(snr: int, name: str) -> dict:
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
         "payload_stop": "STOP",
-        # Tilt / slat angle: HA 0-100, centre (50) = slats horizontal (max light)
+        "optimistic": False,
+        # Tilt / slat angle: HA 0-100, centre (50) = slats horizontal (max light).
+        # Motors with native WMS angle support use hardware commands; motors without
+        # it simulate tilt via a brief open/close pulse.
         "tilt_command_topic": topic_tilt(snr),
         "tilt_status_topic": topic_tilt_state(snr),
         "tilt_min": 0,
         "tilt_max": 100,
         "tilt_opened_value": 50,   # horizontal = open for light
         "tilt_closed_value": 0,    # fully tilted = blocking light
-        "optimistic": False,
     }
 
 
@@ -171,8 +173,9 @@ class WaremaBridge:
         # Stable-position detection: stop fast-polling when position unchanged
         self._stable_pos: dict[int, int] = {}    # snr -> last WMS position
         self._stable_count: dict[int, int] = {}  # snr -> consecutive unchanged polls
-        # Tilt cache: Actuator UP motors always report 0xFF for angle byte,
-        # so we track the last commanded HA tilt (0-100) and report that back.
+        # Tilt support: detected per-blind from first position response.
+        # Motors that always return 0xFF for angle have no slat tilt hardware.
+        self._tilt_capable: set[int] = set()     # snrs with confirmed tilt hardware
         self._tilt_state: dict[int, int] = {}    # snr -> last HA tilt (0-100)
 
     def _ha_tilt(self, angle_pct: int, snr: int) -> int:
@@ -412,7 +415,27 @@ class WaremaBridge:
         await self.mqtt.publish(topic_discovery(snr), b"", retain=True)
         await asyncio.sleep(0.2)
 
-        # HA autodiscovery
+        # Get initial position — also used to detect tilt hardware.
+        # Motors without slat tilt always report 0xFF for angle (→ 171°, out of
+        # the valid WMS range of ±100). Motors with tilt report a real angle.
+        has_tilt = False
+        try:
+            pos = await self.stick.get_position(snr)
+            ha_pos = wms_to_ha_pos(pos["position"])
+            angle_pct = pos["angle"]
+            has_tilt = -100 <= angle_pct <= 100
+            if has_tilt:
+                self._tilt_capable.add(snr)
+                ha_tilt = self._ha_tilt(angle_pct, snr)
+                await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
+            await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
+        except (asyncio.TimeoutError, TimeoutError):
+            log.warning("Could not get initial position for SNR %d", snr)
+
+        tilt_mode = "native" if has_tilt else "pulse"
+        log.info("Registered blind: %s (SNR %d, tilt=%s)", name, snr, tilt_mode)
+
+        # HA autodiscovery — tilt is shown for all motors (pulse for non-hardware tilt)
         payload = discovery_payload(snr, name)
         await self.mqtt.publish(
             topic_discovery(snr),
@@ -420,23 +443,10 @@ class WaremaBridge:
             retain=True,
         )
         await self.mqtt.publish(topic_availability(snr), "online", retain=True)
-        log.info("Registered blind: %s (SNR %d)", name, snr)
 
-        # Clear any retained messages on command topics left over from previous
-        # sessions — empty retained payload removes them from the broker so
-        # they are not replayed on the next startup.
-        for cmd_topic in (topic_cmd_set(snr), topic_cmd_position(snr), topic_tilt(snr)):
+        # Clear any retained messages on command topics left over from previous sessions
+        for cmd_topic in [topic_cmd_set(snr), topic_cmd_position(snr), topic_tilt(snr)]:
             await self.mqtt.publish(cmd_topic, b"", retain=True)
-
-        # Get initial position and tilt
-        try:
-            pos = await self.stick.get_position(snr)
-            ha_pos = wms_to_ha_pos(pos["position"])
-            ha_tilt = self._ha_tilt(pos["angle"], snr)
-            await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
-            await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
-        except (asyncio.TimeoutError, TimeoutError):
-            log.warning("Could not get initial position for SNR %d", snr)
 
     # ------------------------------------------------------------------
     # MQTT command handler
@@ -524,24 +534,40 @@ class WaremaBridge:
                 self._moving_snrs.discard(snr)
                 return
             try:
-                # HA tilt 0-100 → WMS angle pct: 0→-100, 50→0 (horizontal), 100→+100
                 ha_tilt = max(0, min(100, int(payload)))
-                wms_angle = ha_tilt * 2 - 100
-                # Fetch actual current position to avoid inadvertently driving the blind
-                try:
-                    pos = await self.stick.get_position(snr)
-                    wms_pos = max(0, min(WMS_POSITION_MAX, pos["position"]))
-                except (asyncio.TimeoutError, TimeoutError):
-                    blind = self.stick.get_blind_state(snr)
-                    if blind and blind.position >= 0:
-                        wms_pos = max(0, min(WMS_POSITION_MAX, blind.position))
-                    else:
-                        log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
-                        return
-                log.info("TILT SNR %d -> angle %d (HA tilt %d, pos %d)", snr, wms_angle, ha_tilt, wms_pos)
-                self._tilt_state[snr] = ha_tilt  # cache immediately for motors that don't report angle
-                await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
-                await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
+                if snr in self._tilt_capable:
+                    # Motor with WMS angle hardware: use native angle command
+                    # HA tilt 0-100 → WMS angle pct: 0→-100, 50→0 (horizontal), 100→+100
+                    wms_angle = ha_tilt * 2 - 100
+                    # Fetch actual current position to avoid inadvertently driving the blind
+                    try:
+                        pos = await self.stick.get_position(snr)
+                        wms_pos = max(0, min(WMS_POSITION_MAX, pos["position"]))
+                    except (asyncio.TimeoutError, TimeoutError):
+                        blind = self.stick.get_blind_state(snr)
+                        if blind and blind.position >= 0:
+                            wms_pos = max(0, min(WMS_POSITION_MAX, blind.position))
+                        else:
+                            log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
+                            return
+                    log.info("TILT SNR %d -> angle %d (HA tilt %d, pos %d)", snr, wms_angle, ha_tilt, wms_pos)
+                    self._tilt_state[snr] = ha_tilt
+                    await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
+                    await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
+                else:
+                    # Motor without angle hardware: simulate tilt with a 0.25 s pulse
+                    if ha_tilt > 50:
+                        log.info("TILT PULSE OPEN SNR %d (HA tilt %d)", snr, ha_tilt)
+                        await self.stick.set_position(snr, position=0)
+                        await asyncio.sleep(0.25)
+                        await self.stick.stop(snr)
+                    elif ha_tilt < 50:
+                        log.info("TILT PULSE CLOSE SNR %d (HA tilt %d)", snr, ha_tilt)
+                        await self.stick.set_position(snr, position=WMS_POSITION_MAX)
+                        await asyncio.sleep(0.25)
+                        await self.stick.stop(snr)
+                    self._tilt_state[snr] = ha_tilt
+                    await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
             except ValueError:
                 log.warning("Invalid tilt payload: %s", payload)
             except (asyncio.TimeoutError, TimeoutError):

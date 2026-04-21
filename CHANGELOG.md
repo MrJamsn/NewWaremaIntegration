@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.15] - 2026-04-21
+### Changed
+- Tilt is now shown in HA for **all** motors, including Actuator UP (type 0x20) motors
+  that have no physical slat-tilt hardware.
+- Tilt capability is still auto-detected from the first `get_position()` response:
+  motors that return a valid WMS angle (−100…+100) use the native WMS angle command
+  (existing behavior, e.g. Wohnzimmer blinds); motors that return 0xFF simulate tilt
+  via a 0.25 s open/close pulse followed by STOP.
+- The tilt topic is now always cleared on startup for all motors.
+
 ## [1.0.14] - 2026-04-21
 ### Fixed
 - Tilt slider in HA was permanently stuck at 100% for Warema "Actuator UP"
