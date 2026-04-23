@@ -132,9 +132,11 @@ def discovery_payload(snr: int, name: str, tilt: bool = False) -> dict:
         "availability_topic": topic_availability(snr),
         "payload_available": "online",
         "payload_not_available": "offline",
-        # Position: HA uses 0=closed, 100=open — inverted from WMS (0=open, 100=closed)
+        # Position: HA uses 0=closed, 100=open — inverted from WMS (0=open, 100=closed).
+        # position_open is set to 101 (unreachable) so HA never disables the Open button;
+        # the motor's own limit switch stops it at the top safely.
         "position_topic": topic_position(snr),
-        "position_open": 100,
+        "position_open": 101,
         "position_closed": 0,
         "set_position_topic": topic_cmd_position(snr),
         # Invert HA position (100=open) to WMS (0=open) and scale to motor range

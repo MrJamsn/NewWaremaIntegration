@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.18] - 2026-04-23
+### Fixed
+- Open button in HA was disabled when the blind reached 100% (fully open). HA
+  disables the button when `current_position >= position_open`. Set `position_open`
+  to 101 (a value the bridge never publishes) so the Open button is always enabled;
+  the motor's own limit switch handles the mechanical stop safely.
+
 ## [1.0.17] - 2026-04-23
 ### Fixed
 - Tilt-capable motors (e.g. Wohnzimmer slat blinds) were sometimes registered as
