@@ -414,7 +414,7 @@ class WaremaBridge:
                 log.debug("Skipping non-motor device %s (%s)", snr, dev["device_type_str"])
                 continue
 
-            await self._register_blind(snr, dev["device_type_str"])
+            await self._register_blind(snr, dev["device_type_str"], dev["device_type"])
 
         # Force-add devices that may not have responded to scan
         for snr_s, dtype in FORCE_DEVICES.items():
@@ -432,30 +432,27 @@ class WaremaBridge:
         else:
             log.info("Registered %d blind(s)", len(self._registered_snrs))
 
-    async def _register_blind(self, snr: int, type_str: str):
+    async def _register_blind(self, snr: int, type_str: str, device_type: str = "25"):
         """Add blind to stick, publish discovery, mark as online."""
         name = f"Warema {type_str.strip()} {snr}"
         self.stick.add_blind(snr, name=name)
         self._registered_snrs.add(snr)
 
-        # Clear the retained discovery message first so HA fully re-creates
-        # the entity — this picks up any new capabilities (tilt, position
-        # slider) that were added in newer addon versions.
+        # Type "20" (Actuator UP) has no physical slat-tilt hardware.
+        # Using the motor type from the scan is reliable; angle-byte detection is not
+        # because tilt-capable motors report 0x7F (127, out of range) for neutral slats.
+        has_tilt = device_type != "20"
+        if has_tilt:
+            self._tilt_capable.add(snr)
+
         await self.mqtt.publish(topic_discovery(snr), b"", retain=True)
         await asyncio.sleep(0.2)
 
-        # Get initial position — also used to detect tilt hardware.
-        # Motors without slat tilt always report 0xFF for angle (→ 171°, out of
-        # the valid WMS range of ±100). Motors with tilt report a real angle.
-        has_tilt = False
         try:
             pos = await self.stick.get_position(snr)
             ha_pos = wms_to_ha_pos(pos["position"])
-            angle_pct = pos["angle"]
-            has_tilt = -100 <= angle_pct <= 100
             if has_tilt:
-                self._tilt_capable.add(snr)
-                ha_tilt = self._ha_tilt(angle_pct, snr)
+                ha_tilt = self._ha_tilt(pos["angle"], snr)
                 await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
         except (asyncio.TimeoutError, TimeoutError):
@@ -596,12 +593,12 @@ class WaremaBridge:
                     if ha_tilt > 50:
                         log.info("TILT PULSE OPEN SNR %d (HA tilt %d)", snr, ha_tilt)
                         await self.stick.set_position(snr, position=0)
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.1)
                         await self.stick.stop(snr)
                     elif ha_tilt < 50:
                         log.info("TILT PULSE CLOSE SNR %d (HA tilt %d)", snr, ha_tilt)
                         await self.stick.set_position(snr, position=WMS_POSITION_MAX)
-                        await asyncio.sleep(0.25)
+                        await asyncio.sleep(0.1)
                         await self.stick.stop(snr)
                     self._tilt_state[snr] = ha_tilt
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.17] - 2026-04-23
+### Fixed
+- Tilt-capable motors (e.g. Wohnzimmer slat blinds) were sometimes registered as
+  non-tilt and given pulse buttons instead of the native tilt slider. Root cause:
+  when slats are at the neutral/horizontal position the motor reports angle byte
+  `0x7F` (127), which is outside the valid WMS range (−100…+100), so the previous
+  angle-based detection concluded no tilt hardware was present. Fixed by using the
+  motor type from the device scan instead (`type "20"` = Actuator UP = no tilt
+  hardware; all other motorized types are treated as tilt-capable).
+- Tilt pulse duration reduced from 0.25 s to 0.1 s per button press.
+
 ## [1.0.16] - 2026-04-23
 ### Changed
 - Replaced the tilt slider for motors without physical slat-tilt hardware with
