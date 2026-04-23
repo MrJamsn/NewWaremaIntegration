@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.16] - 2026-04-23
+### Changed
+- Replaced the tilt slider for motors without physical slat-tilt hardware with
+  two dedicated **Tilt Open** / **Tilt Close** button entities on the same HA
+  device card. Each button sends a 0.25 s open or close pulse followed by STOP,
+  which physically tilts the slats a small amount. This is more reliable than
+  the slider, which HA would re-send on state restore or sometimes not fire at all.
+- Motors with real WMS angle hardware (e.g. Wohnzimmer slat blinds) continue to
+  use the native tilt slider on the cover entity — no change for those.
+
 ## [1.0.15] - 2026-04-21
 ### Changed
 - Tilt is now shown in HA for **all** motors, including Actuator UP (type 0x20) motors

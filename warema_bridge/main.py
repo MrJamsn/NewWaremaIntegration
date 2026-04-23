@@ -113,11 +113,14 @@ def topic_tilt(snr: int) -> str:
 def topic_tilt_state(snr: int) -> str:
     return f"{STATE_PREFIX}/{snr}/tilt_state"
 
+def topic_btn_discovery(snr: int, direction: str) -> str:
+    return f"{DISCOVERY_PREFIX}/button/warema_{snr}_tilt_{direction}/config"
 
-def discovery_payload(snr: int, name: str) -> dict:
+
+def discovery_payload(snr: int, name: str, tilt: bool = False) -> dict:
     """Build the HA MQTT discovery payload for a cover entity."""
     uid = f"warema_{snr}"
-    return {
+    payload = {
         "name": name,
         "unique_id": uid,
         "device": {
@@ -141,15 +144,41 @@ def discovery_payload(snr: int, name: str) -> dict:
         "payload_close": "CLOSE",
         "payload_stop": "STOP",
         "optimistic": False,
-        # Tilt / slat angle: HA 0-100, centre (50) = slats horizontal (max light).
-        # Motors with native WMS angle support use hardware commands; motors without
-        # it simulate tilt via a brief open/close pulse.
-        "tilt_command_topic": topic_tilt(snr),
-        "tilt_status_topic": topic_tilt_state(snr),
-        "tilt_min": 0,
-        "tilt_max": 100,
-        "tilt_opened_value": 50,   # horizontal = open for light
-        "tilt_closed_value": 0,    # fully tilted = blocking light
+    }
+    if tilt:
+        # Native WMS angle hardware: expose tilt slider on the cover entity
+        payload.update({
+            "tilt_command_topic": topic_tilt(snr),
+            "tilt_status_topic": topic_tilt_state(snr),
+            "tilt_min": 0,
+            "tilt_max": 100,
+            "tilt_opened_value": 50,
+            "tilt_closed_value": 0,
+        })
+    return payload
+
+
+def button_discovery_payload(snr: int, name: str, direction: str) -> dict:
+    """HA MQTT button entity for a single tilt-pulse direction (open or close)."""
+    uid = f"warema_{snr}_tilt_{direction}"
+    label = "Tilt Open" if direction == "open" else "Tilt Close"
+    icon = "mdi:arrow-up-bold" if direction == "open" else "mdi:arrow-down-bold"
+    pulse_value = "75" if direction == "open" else "25"
+    return {
+        "name": label,
+        "unique_id": uid,
+        "icon": icon,
+        "device": {
+            "identifiers": [f"warema_{snr}"],
+            "name": name,
+            "manufacturer": "Warema",
+            "model": "WMS Motor",
+        },
+        "availability_topic": topic_availability(snr),
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "command_topic": topic_tilt(snr),
+        "payload_press": pulse_value,
     }
 
 
@@ -432,16 +461,24 @@ class WaremaBridge:
         except (asyncio.TimeoutError, TimeoutError):
             log.warning("Could not get initial position for SNR %d", snr)
 
-        tilt_mode = "native" if has_tilt else "pulse"
+        tilt_mode = "native" if has_tilt else "pulse-buttons"
         log.info("Registered blind: %s (SNR %d, tilt=%s)", name, snr, tilt_mode)
 
-        # HA autodiscovery — tilt is shown for all motors (pulse for non-hardware tilt)
-        payload = discovery_payload(snr, name)
-        await self.mqtt.publish(
-            topic_discovery(snr),
-            json.dumps(payload),
-            retain=True,
-        )
+        if has_tilt:
+            # Hardware angle support: tilt slider on cover entity, remove any old buttons
+            payload = discovery_payload(snr, name, tilt=True)
+            for direction in ("open", "close"):
+                await self.mqtt.publish(topic_btn_discovery(snr, direction), b"", retain=True)
+        else:
+            # No angle hardware: cover without tilt slider + two dedicated pulse buttons
+            payload = discovery_payload(snr, name, tilt=False)
+            for direction in ("open", "close"):
+                btn = button_discovery_payload(snr, name, direction)
+                await self.mqtt.publish(
+                    topic_btn_discovery(snr, direction), json.dumps(btn), retain=True
+                )
+
+        await self.mqtt.publish(topic_discovery(snr), json.dumps(payload), retain=True)
         await self.mqtt.publish(topic_availability(snr), "online", retain=True)
 
         # Clear any retained messages on command topics left over from previous sessions
