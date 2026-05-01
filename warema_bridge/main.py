@@ -113,14 +113,15 @@ def topic_tilt(snr: int) -> str:
 def topic_tilt_state(snr: int) -> str:
     return f"{STATE_PREFIX}/{snr}/tilt_state"
 
-def topic_btn_discovery(snr: int, direction: str) -> str:
-    return f"{DISCOVERY_PREFIX}/button/warema_{snr}_tilt_{direction}/config"
-
-
-def discovery_payload(snr: int, name: str, tilt: bool = False) -> dict:
+def discovery_payload(snr: int, name: str, tilt_hardware: bool = True) -> dict:
     """Build the HA MQTT discovery payload for a cover entity."""
     uid = f"warema_{snr}"
-    payload = {
+    # Tilt is included for all motors so the tilt buttons appear on the cover card.
+    # Hardware motors: tilt_opened_value=50 (horizontal slats, max light) triggers
+    #   the native WMS angle command.
+    # Pulse motors: tilt_opened_value=100 and tilt_closed_value=0 trigger the
+    #   >50 / <50 pulse logic (brief open or close movement).
+    return {
         "name": name,
         "unique_id": uid,
         "device": {
@@ -139,48 +140,18 @@ def discovery_payload(snr: int, name: str, tilt: bool = False) -> dict:
         "position_open": 101,
         "position_closed": 0,
         "set_position_topic": topic_cmd_position(snr),
-        # Invert HA position (100=open) to WMS (0=open) and scale to motor range
         "set_position_template": f"{{{{ ((100 - position | int) * {WMS_POSITION_MAX} / 100) | int }}}}",
         "command_topic": topic_cmd_set(snr),
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
         "payload_stop": "STOP",
         "optimistic": False,
-    }
-    if tilt:
-        # Native WMS angle hardware: expose tilt slider on the cover entity
-        payload.update({
-            "tilt_command_topic": topic_tilt(snr),
-            "tilt_status_topic": topic_tilt_state(snr),
-            "tilt_min": 0,
-            "tilt_max": 100,
-            "tilt_opened_value": 50,
-            "tilt_closed_value": 0,
-        })
-    return payload
-
-
-def button_discovery_payload(snr: int, name: str, direction: str) -> dict:
-    """HA MQTT button entity for a single tilt-pulse direction (open or close)."""
-    uid = f"warema_{snr}_tilt_{direction}"
-    label = "Tilt Open" if direction == "open" else "Tilt Close"
-    icon = "mdi:arrow-up-bold" if direction == "open" else "mdi:arrow-down-bold"
-    pulse_value = "75" if direction == "open" else "25"
-    return {
-        "name": label,
-        "unique_id": uid,
-        "icon": icon,
-        "device": {
-            "identifiers": [f"warema_{snr}"],
-            "name": name,
-            "manufacturer": "Warema",
-            "model": "WMS Motor",
-        },
-        "availability_topic": topic_availability(snr),
-        "payload_available": "online",
-        "payload_not_available": "offline",
-        "command_topic": topic_tilt(snr),
-        "payload_press": pulse_value,
+        "tilt_command_topic": topic_tilt(snr),
+        "tilt_status_topic": topic_tilt_state(snr),
+        "tilt_min": 0,
+        "tilt_max": 100,
+        "tilt_opened_value": 50 if tilt_hardware else 100,
+        "tilt_closed_value": 0,
     }
 
 
@@ -460,23 +431,18 @@ class WaremaBridge:
         except (asyncio.TimeoutError, TimeoutError):
             log.warning("Could not get initial position for SNR %d", snr)
 
-        tilt_mode = "native" if has_tilt else "pulse-buttons"
+        tilt_mode = "native" if has_tilt else "pulse"
         log.info("Registered blind: %s (SNR %d, tilt=%s)", name, snr, tilt_mode)
 
-        if has_tilt:
-            # Hardware angle support: tilt slider on cover entity, remove any old buttons
-            payload = discovery_payload(snr, name, tilt=True)
-            for direction in ("open", "close"):
-                await self.mqtt.publish(topic_btn_discovery(snr, direction), b"", retain=True)
-        else:
-            # No angle hardware: cover without tilt slider + two dedicated pulse buttons
-            payload = discovery_payload(snr, name, tilt=False)
-            for direction in ("open", "close"):
-                btn = button_discovery_payload(snr, name, direction)
-                await self.mqtt.publish(
-                    topic_btn_discovery(snr, direction), json.dumps(btn), retain=True
-                )
+        # Remove any old MQTT button entities published by v1.0.16-1.0.19
+        for direction in ("open", "close"):
+            await self.mqtt.publish(
+                f"{DISCOVERY_PREFIX}/button/warema_{snr}_tilt_{direction}/config",
+                b"", retain=True,
+            )
 
+        # Tilt buttons are now part of the cover card for all motors
+        payload = discovery_payload(snr, name, tilt_hardware=has_tilt)
         await self.mqtt.publish(topic_discovery(snr), json.dumps(payload), retain=True)
         await self.mqtt.publish(topic_availability(snr), "online", retain=True)
 

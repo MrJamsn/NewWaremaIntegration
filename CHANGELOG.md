@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.20] - 2026-04-23
+### Changed
+- Tilt buttons for pulse motors (no hardware angle) are now part of the cover
+  card instead of separate button entities. All motors now include
+  `tilt_command_topic` in their discovery payload. Hardware-tilt motors keep
+  `tilt_opened_value: 50` (horizontal slats); pulse motors use
+  `tilt_opened_value: 100` and `tilt_closed_value: 0` so the cover card's
+  built-in tilt buttons trigger the 0.1 s open/close pulse.
+- Old separate MQTT button entities (published in v1.0.16–1.0.19) are removed
+  from the broker on restart.
+
 ## [1.0.19] - 2026-04-23
 ### Fixed
 - Reverted the v1.0.17 device-type tilt detection. The Wohnzimmer motor (37FC15)
