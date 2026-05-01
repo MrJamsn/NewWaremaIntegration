@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.19] - 2026-04-23
+### Fixed
+- Reverted the v1.0.17 device-type tilt detection. The Wohnzimmer motor (37FC15)
+  is also type "20" (Actuator UP) — the same type as the no-tilt motors — so the
+  device-type check incorrectly disabled tilt for it. The angle-byte detection from
+  v1.0.15 is correct: `angle_hex_to_pct("7F") = 0` (neutral, in range), while
+  `angle_hex_to_pct("FF") = 171` (out of range, no tilt hardware).
+
 ## [1.0.18] - 2026-04-23
 ### Fixed
 - Open button in HA was disabled when the blind reached 100% (fully open). HA

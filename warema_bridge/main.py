@@ -416,7 +416,7 @@ class WaremaBridge:
                 log.debug("Skipping non-motor device %s (%s)", snr, dev["device_type_str"])
                 continue
 
-            await self._register_blind(snr, dev["device_type_str"], dev["device_type"])
+            await self._register_blind(snr, dev["device_type_str"])
 
         # Force-add devices that may not have responded to scan
         for snr_s, dtype in FORCE_DEVICES.items():
@@ -434,27 +434,27 @@ class WaremaBridge:
         else:
             log.info("Registered %d blind(s)", len(self._registered_snrs))
 
-    async def _register_blind(self, snr: int, type_str: str, device_type: str = "25"):
+    async def _register_blind(self, snr: int, type_str: str):
         """Add blind to stick, publish discovery, mark as online."""
         name = f"Warema {type_str.strip()} {snr}"
         self.stick.add_blind(snr, name=name)
         self._registered_snrs.add(snr)
 
-        # Type "20" (Actuator UP) has no physical slat-tilt hardware.
-        # Using the motor type from the scan is reliable; angle-byte detection is not
-        # because tilt-capable motors report 0x7F (127, out of range) for neutral slats.
-        has_tilt = device_type != "20"
-        if has_tilt:
-            self._tilt_capable.add(snr)
-
         await self.mqtt.publish(topic_discovery(snr), b"", retain=True)
         await asyncio.sleep(0.2)
 
+        # Tilt detection: motors without slat hardware always return angle byte 0xFF,
+        # which angle_hex_to_pct decodes to 171 (out of -100..100).
+        # Tilt-capable motors return 0x7F (→ 0) at neutral or real angles when tilted.
+        has_tilt = False
         try:
             pos = await self.stick.get_position(snr)
             ha_pos = wms_to_ha_pos(pos["position"])
+            angle_pct = pos["angle"]
+            has_tilt = -100 <= angle_pct <= 100
             if has_tilt:
-                ha_tilt = self._ha_tilt(pos["angle"], snr)
+                self._tilt_capable.add(snr)
+                ha_tilt = self._ha_tilt(angle_pct, snr)
                 await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
             await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
         except (asyncio.TimeoutError, TimeoutError):
