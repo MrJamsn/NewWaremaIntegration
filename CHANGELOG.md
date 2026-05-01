@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.21] - 2026-04-23
+### Added
+- Auto-calibration of per-motor close position. The first time a blind fully
+  closes (CLOSE button, motor stops itself), the bridge records the WMS stop
+  position as that motor's calibrated maximum and saves it to
+  `/share/warema_calibration.json`. On subsequent restarts the file is loaded,
+  so calibration is permanent. No manual `wms_position_max` configuration is
+  needed after the first close cycle per blind.
+- `set_position_template` removed from the MQTT discovery payload; HA now sends
+  the raw position (0–100) directly and the bridge converts it using each motor's
+  calibrated max. This makes the position slider accurate for all motors
+  automatically.
+- CLOSE always sends WMS position 100 (the protocol maximum) so the motor always
+  travels to its physical limit, enabling reliable calibration even if
+  `wms_position_max` was set incorrectly before.
+
 ## [1.0.20] - 2026-04-23
 ### Changed
 - Tilt buttons for pulse motors (no hardware angle) are now part of the cover

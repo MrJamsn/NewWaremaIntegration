@@ -69,13 +69,6 @@ for entry in get_env("FORCE_DEVICES").split(","):
 LOG_LEVEL = get_env("LOG_LEVEL", "info").upper()
 
 
-def wms_to_ha_pos(wms: int) -> int:
-    """Convert WMS position (0=open … WMS_POSITION_MAX=closed) to HA position (0=closed … 100=open)."""
-    return max(0, min(100, round(100 - wms * 100 / WMS_POSITION_MAX)))
-
-def ha_to_wms_pos(ha: int) -> int:
-    """Convert HA position (0=closed … 100=open) to WMS position (0=open … WMS_POSITION_MAX=closed)."""
-    return max(0, min(WMS_POSITION_MAX, round((100 - ha) * WMS_POSITION_MAX / 100)))
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -140,7 +133,6 @@ def discovery_payload(snr: int, name: str, tilt_hardware: bool = True) -> dict:
         "position_open": 101,
         "position_closed": 0,
         "set_position_topic": topic_cmd_position(snr),
-        "set_position_template": f"{{{{ ((100 - position | int) * {WMS_POSITION_MAX} / 100) | int }}}}",
         "command_topic": topic_cmd_set(snr),
         "payload_open": "OPEN",
         "payload_close": "CLOSE",
@@ -179,6 +171,9 @@ class WaremaBridge:
         # Motors that always return 0xFF for angle have no slat tilt hardware.
         self._tilt_capable: set[int] = set()     # snrs with confirmed tilt hardware
         self._tilt_state: dict[int, int] = {}    # snr -> last HA tilt (0-100)
+        # Per-motor position calibration: learned from the first full CLOSE.
+        self._motor_max: dict[int, int] = {}     # snr -> learned WMS close position
+        self._close_tracking: set[int] = set()  # snrs currently being fully closed
 
     def _ha_tilt(self, angle_pct: int, snr: int) -> int:
         """Convert WMS angle to HA tilt, using cache when motor reports invalid angle."""
@@ -187,6 +182,38 @@ class WaremaBridge:
             self._tilt_state[snr] = ha
             return ha
         return self._tilt_state.get(snr, 50)  # default: horizontal
+
+    def _motor_max_for(self, snr: int) -> int:
+        """Return the learned WMS close position for this motor, or the config default."""
+        return self._motor_max.get(snr, WMS_POSITION_MAX)
+
+    def _wms_to_ha_pos(self, snr: int, wms: int) -> int:
+        """Convert WMS position to HA position (0=closed … 100=open) using per-motor max."""
+        m = max(1, self._motor_max_for(snr))
+        return max(0, min(100, round(100 - wms * 100 / m)))
+
+    def _ha_pos_to_wms(self, snr: int, ha: int) -> int:
+        """Convert HA position (0=closed … 100=open) to WMS position using per-motor max."""
+        m = self._motor_max_for(snr)
+        return max(0, min(m, round((100 - ha) * m / 100)))
+
+    def _load_calibration(self):
+        try:
+            with open("/share/warema_calibration.json") as f:
+                data = json.load(f)
+                self._motor_max = {int(k): v for k, v in data.get("motor_max", {}).items()}
+                log.info("Loaded calibration for %d motor(s): %s", len(self._motor_max), self._motor_max)
+        except FileNotFoundError:
+            log.debug("No calibration file, using wms_position_max=%d as default", WMS_POSITION_MAX)
+        except Exception as e:
+            log.warning("Could not load calibration: %s", e)
+
+    def _save_calibration(self):
+        try:
+            with open("/share/warema_calibration.json", "w") as f:
+                json.dump({"motor_max": self._motor_max}, f, indent=2)
+        except Exception as e:
+            log.warning("Could not save calibration: %s", e)
 
     def _start_tracking(self, snr: int):
         """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
@@ -235,7 +262,7 @@ class WaremaBridge:
                 await self._run_discovery_mode()
                 return
 
-            # Scan + register blinds
+            self._load_calibration()
             await self._initial_scan()
 
             # Subscribe to command topics
@@ -420,7 +447,7 @@ class WaremaBridge:
         has_tilt = False
         try:
             pos = await self.stick.get_position(snr)
-            ha_pos = wms_to_ha_pos(pos["position"])
+            ha_pos = self._wms_to_ha_pos(snr, pos["position"])
             angle_pct = pos["angle"]
             has_tilt = -100 <= angle_pct <= 100
             if has_tilt:
@@ -500,12 +527,16 @@ class WaremaBridge:
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
                 try:
-                    await self.stick.set_position(snr, position=WMS_POSITION_MAX)
+                    # Always send WMS=100 so the motor reaches its physical limit;
+                    # we auto-learn the actual stop position for position calibration.
+                    await self.stick.set_position(snr, position=100)
+                    self._close_tracking.add(snr)
                     self._start_tracking(snr)
                 except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending CLOSE to SNR %d", snr)
             elif payload == "STOP":
                 log.info("STOP SNR %d", snr)
+                self._close_tracking.discard(snr)  # user interrupted — don't learn
                 try:
                     await self.stick.stop(snr)
                 except (asyncio.TimeoutError, TimeoutError):
@@ -514,10 +545,9 @@ class WaremaBridge:
 
         elif cmd == "set_position":
             try:
-                # HA sends position already inverted via set_position_template
-                wms_pos = int(payload)
-                wms_pos = max(0, min(100, wms_pos))
-                log.info("SET_POSITION SNR %d -> %d%%", snr, wms_pos)
+                ha_pos = max(0, min(100, int(payload)))
+                wms_pos = self._ha_pos_to_wms(snr, ha_pos)
+                log.info("SET_POSITION SNR %d: HA %d%% -> WMS %d", snr, ha_pos, wms_pos)
                 await self.stick.set_position(snr, position=wms_pos)
                 self._start_tracking(snr)
             except ValueError:
@@ -544,11 +574,11 @@ class WaremaBridge:
                     # Fetch actual current position to avoid inadvertently driving the blind
                     try:
                         pos = await self.stick.get_position(snr)
-                        wms_pos = max(0, min(WMS_POSITION_MAX, pos["position"]))
+                        wms_pos = max(0, min(self._motor_max_for(snr), pos["position"]))
                     except (asyncio.TimeoutError, TimeoutError):
                         blind = self.stick.get_blind_state(snr)
                         if blind and blind.position >= 0:
-                            wms_pos = max(0, min(WMS_POSITION_MAX, blind.position))
+                            wms_pos = max(0, min(self._motor_max_for(snr), blind.position))
                         else:
                             log.warning("Tilt SNR %d: cannot determine current position, skipping", snr)
                             return
@@ -565,7 +595,7 @@ class WaremaBridge:
                         await self.stick.stop(snr)
                     elif ha_tilt < 50:
                         log.info("TILT PULSE CLOSE SNR %d (HA tilt %d)", snr, ha_tilt)
-                        await self.stick.set_position(snr, position=WMS_POSITION_MAX)
+                        await self.stick.set_position(snr, position=100)
                         await asyncio.sleep(0.1)
                         await self.stick.stop(snr)
                     self._tilt_state[snr] = ha_tilt
@@ -584,7 +614,7 @@ class WaremaBridge:
         snr = blind.snr
         if snr not in self._registered_snrs:
             return
-        ha_pos = wms_to_ha_pos(blind.position)
+        ha_pos = self._wms_to_ha_pos(snr, blind.position)
         ha_tilt = self._ha_tilt(blind.angle, snr)
         log.debug("Position update SNR %d: WMS=%d HA=%d tilt=%d moving=%s",
                   snr, blind.position, ha_pos, ha_tilt, blind.moving)
@@ -627,7 +657,7 @@ class WaremaBridge:
             for snr in list(self._registered_snrs):
                 try:
                     pos = await self.stick.get_position(snr)
-                    ha_pos = wms_to_ha_pos(pos["position"])
+                    ha_pos = self._wms_to_ha_pos(snr, pos["position"])
                     ha_tilt = self._ha_tilt(pos["angle"], snr)
                     await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
@@ -659,7 +689,7 @@ class WaremaBridge:
                 try:
                     pos = await self.stick.get_position(snr)
                     wms_pos = pos["position"]
-                    ha_pos = wms_to_ha_pos(wms_pos)
+                    ha_pos = self._wms_to_ha_pos(snr, wms_pos)
                     ha_tilt = self._ha_tilt(pos["angle"], snr)
                     log.debug("Moving SNR %d: WMS=%d HA=%d%% moving=%s",
                               snr, wms_pos, ha_pos, pos["moving"])
@@ -681,6 +711,20 @@ class WaremaBridge:
                         self._stable_pos[snr] = wms_pos
 
                     if stopped:
+                        # Auto-learn motor max: if a full CLOSE was in progress and the
+                        # motor stopped itself (not via explicit STOP), record the WMS
+                        # position as this motor's calibrated close position.
+                        if snr in self._close_tracking and wms_pos >= 10:
+                            self._close_tracking.discard(snr)
+                            old = self._motor_max.get(snr)
+                            if old != wms_pos:
+                                self._motor_max[snr] = wms_pos
+                                log.info("SNR %d: calibrated motor_max = %d WMS (was %s)",
+                                         snr, wms_pos, old if old is not None else WMS_POSITION_MAX)
+                                self._save_calibration()
+                                # Republish corrected position now that max is known
+                                ha_pos = self._wms_to_ha_pos(snr, wms_pos)
+                                await self.mqtt.publish(topic_position(snr), str(ha_pos), retain=True)
                         log.info("SNR %d stopped at WMS pos %d (HA %d%%)", snr, wms_pos, ha_pos)
                         self._moving_snrs.discard(snr)
                         self._stable_pos.pop(snr, None)
