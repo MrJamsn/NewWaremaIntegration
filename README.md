@@ -29,7 +29,9 @@ Python reimplementation — no Node.js, no unmaintained npm dependencies.
 | `wms_pan_id` | WMS PAN ID (set to `FFFF` for discovery mode) |
 | `wms_key` | WMS network key |
 | `polling_interval` | Seconds between position polls (default: 30) |
-| `moving_interval` | Seconds between polls while a blind is moving (default: 2) |
+| `moving_interval` | Seconds between polls while a blind is moving (default: 1) |
+| `wms_position_max` | Fallback WMS close position until a blind is auto-calibrated (default: 100). Each blind learns its real value on its first full CLOSE; stored in `/share/warema_calibration.json` (delete to recalibrate) |
+| `tilt_pulse_ms` | Pulse length for tilt on motors without slat-angle hardware (default: 100) |
 | `ignored_devices` | Comma-separated list of SNRs to ignore |
 | `force_devices` | Comma-separated SNRs to add even if not found by scan (format: `SNR` or `SNR:TYPE`) |
 | `log_level` | `debug`, `info`, `warning`, `error` |

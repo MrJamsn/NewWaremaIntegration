@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.22] - 2026-09-23
+### Fixed
+- Calibration could learn a wrong close position: CLOSE followed by
+  SET_POSITION/OPEN/tilt (without STOP) left the calibration run active, so the
+  stop at the new target was stored as the motor max. Every command other than
+  CLOSE now ends the calibration run.
+- A CLOSE that ended at an implausible position (< WMS 10) left the calibration
+  run active, so a later unrelated stop could be learned. The run now always
+  ends when the blind stops.
+- Tilt pulse: if the move command timed out, STOP was never sent and the blind
+  could drive all the way to its end position. STOP is now always sent.
+- OPEN/CLOSE/SET_POSITION timeouts no longer skip position tracking — the motor
+  often executes the command even when the stick's reply is lost, so HA now
+  still follows the real position.
+- Calibration ignores ±1 WMS jitter instead of rewriting the file on every close.
+
+### Added
+- `tilt_pulse_ms` option (default 100) to tune the tilt pulse without a new release.
+
 ## [1.0.21] - 2026-04-23
 ### Added
 - Auto-calibration of per-motor close position. The first time a blind fully

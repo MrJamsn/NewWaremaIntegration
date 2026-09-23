@@ -6,11 +6,16 @@ Uses MQTT autodiscovery so blinds appear automatically in Home Assistant as cove
 
 MQTT topics (per blind, SNR as identifier):
   Discovery:        homeassistant/cover/warema_<snr>/config
-  Position state:   warema/<snr>/position_state    (0-100, 0=open)
+  Position state:   warema/<snr>/position_state    (HA scale: 0=closed, 100=open)
+  Tilt state:       warema/<snr>/tilt_state         (0-100)
   Availability:     warema/<snr>/availability       (online/offline)
   Commands:
     warema/<snr>/set           OPEN | CLOSE | STOP
-    warema/<snr>/set_position  0-100 (0=open, 100=closed)
+    warema/<snr>/set_position  0-100 (HA scale: 0=closed, 100=open)
+    warema/<snr>/tilt          0-100 | STOP
+
+Position calibration (learned motor close position per SNR) is stored in
+/share/warema_calibration.json — delete it to recalibrate.
 """
 
 import asyncio
@@ -52,6 +57,9 @@ MOVING_INTERVAL   = get_env_int("MOVING_INTERVAL", 2)      # seconds
 # Maximum WMS position value the motor physically responds to.
 # Most motors use 0-100; some models close fully at WMS 50 — set to 50 in that case.
 WMS_POSITION_MAX  = get_env_int("WMS_POSITION_MAX", 100)
+# Tilt pulse duration for motors without angle hardware (the stick adds its own
+# response latency on top of this).
+TILT_PULSE_MS     = get_env_int("TILT_PULSE_MS", 100)
 
 IGNORED_DEVICES   = {s.strip() for s in get_env("IGNORED_DEVICES").split(",") if s.strip()}
 FORCE_DEVICES     = {}  # snr_hex -> device_type (parsed below)
@@ -214,6 +222,16 @@ class WaremaBridge:
                 json.dump({"motor_max": self._motor_max}, f, indent=2)
         except Exception as e:
             log.warning("Could not save calibration: %s", e)
+
+    async def _tilt_pulse(self, snr: int, position: int):
+        """Move briefly towards `position`, then stop. STOP is always sent, even if the
+        move command timed out — the motor may have started anyway and would otherwise
+        run to its end position."""
+        try:
+            await self.stick.set_position(snr, position=position)
+            await asyncio.sleep(TILT_PULSE_MS / 1000)
+        finally:
+            await self.stick.stop(snr)
 
     def _start_tracking(self, snr: int):
         """Add a blind to the fast-poll set and wake the moving-poll loop immediately."""
@@ -516,14 +534,20 @@ class WaremaBridge:
 
         cmd = parts[2]
 
+        # Any command other than CLOSE interrupts a calibration run; otherwise the
+        # stop position of e.g. a SET_POSITION would be learned as the motor max.
+        if not (cmd == "set" and payload == "CLOSE"):
+            self._close_tracking.discard(snr)
+
         if cmd == "set":
             if payload == "OPEN":
                 log.info("OPEN SNR %d", snr)
                 try:
                     await self.stick.set_position(snr, position=0)
-                    self._start_tracking(snr)
                 except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending OPEN to SNR %d", snr)
+                # Track even on timeout: the motor may have executed the command anyway
+                self._start_tracking(snr)
             elif payload == "CLOSE":
                 log.info("CLOSE SNR %d", snr)
                 try:
@@ -531,12 +555,11 @@ class WaremaBridge:
                     # we auto-learn the actual stop position for position calibration.
                     await self.stick.set_position(snr, position=100)
                     self._close_tracking.add(snr)
-                    self._start_tracking(snr)
                 except (asyncio.TimeoutError, TimeoutError):
                     log.warning("Timeout sending CLOSE to SNR %d", snr)
+                self._start_tracking(snr)
             elif payload == "STOP":
                 log.info("STOP SNR %d", snr)
-                self._close_tracking.discard(snr)  # user interrupted — don't learn
                 try:
                     await self.stick.stop(snr)
                 except (asyncio.TimeoutError, TimeoutError):
@@ -554,6 +577,7 @@ class WaremaBridge:
                 log.warning("Invalid position payload: %s", payload)
             except (asyncio.TimeoutError, TimeoutError):
                 log.warning("Timeout sending position %s to SNR %d", payload, snr)
+                self._start_tracking(snr)
 
         elif cmd == "tilt":
             # HA sends "STOP" to tilt topic too when the stop button is pressed
@@ -587,17 +611,13 @@ class WaremaBridge:
                     await self.stick.set_position(snr, position=wms_pos, angle=wms_angle)
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
                 else:
-                    # Motor without angle hardware: simulate tilt with a 0.25 s pulse
+                    # Motor without angle hardware: simulate tilt with a short pulse
                     if ha_tilt > 50:
                         log.info("TILT PULSE OPEN SNR %d (HA tilt %d)", snr, ha_tilt)
-                        await self.stick.set_position(snr, position=0)
-                        await asyncio.sleep(0.1)
-                        await self.stick.stop(snr)
+                        await self._tilt_pulse(snr, position=0)
                     elif ha_tilt < 50:
                         log.info("TILT PULSE CLOSE SNR %d (HA tilt %d)", snr, ha_tilt)
-                        await self.stick.set_position(snr, position=100)
-                        await asyncio.sleep(0.1)
-                        await self.stick.stop(snr)
+                        await self._tilt_pulse(snr, position=100)
                     self._tilt_state[snr] = ha_tilt
                     await self.mqtt.publish(topic_tilt_state(snr), str(ha_tilt), retain=True)
             except ValueError:
@@ -714,10 +734,15 @@ class WaremaBridge:
                         # Auto-learn motor max: if a full CLOSE was in progress and the
                         # motor stopped itself (not via explicit STOP), record the WMS
                         # position as this motor's calibrated close position.
-                        if snr in self._close_tracking and wms_pos >= 10:
+                        # Always end the calibration run here, even for implausible
+                        # values, so a later unrelated stop can't be learned.
+                        if snr in self._close_tracking:
                             self._close_tracking.discard(snr)
                             old = self._motor_max.get(snr)
-                            if old != wms_pos:
+                            if wms_pos < 10:
+                                log.info("SNR %d: CLOSE ended at WMS %d — implausible, not calibrating",
+                                         snr, wms_pos)
+                            elif old is None or abs(old - wms_pos) >= 2:  # ignore ±1 jitter
                                 self._motor_max[snr] = wms_pos
                                 log.info("SNR %d: calibrated motor_max = %d WMS (was %s)",
                                          snr, wms_pos, old if old is not None else WMS_POSITION_MAX)
